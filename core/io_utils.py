@@ -1,106 +1,104 @@
-# This file will read files, implement PyProBE's file parser, return the relevant plots.
-# Currently, it only reads .mpt file but I will return and add the ability to read .txt and .csv
-
 from pathlib import Path
-import pyprobe
+from typing import List
+
+import pyimpspec
+from pyimpspec import DataSet
 
 
-class UnsupportedFileTypeError(Exception):
-    """Raised when a file extension has no registered reader."""
+class EISParseError(Exception):
+    """Raised when parsing an EIS .mpt file fails."""
     pass
 
 
-def _read_mpt(filepath: Path, cell_info: dict | None = None):
-    """Read a Bio-Logic .mpt file using PyProBE.
-
-    Args:
-        filepath: Path to the .mpt file.
-        cell_info: Metadata dict for the PyProBE Cell object (e.g. Name,
-            Chemistry). Defaults to a minimal placeholder if not provided.
-
-    Returns:
-        The PyProBE Procedure object for this file.
+class EISDataset:
     """
-    if cell_info is None:
-        cell_info = {"Name": filepath.stem}
-
-    cell = pyprobe.Cell(info=cell_info)
-    cell.import_from_cycler(
-        procedure_name=filepath.stem,
-        cycler="biologic",
-        input_data_path=str(filepath),
-    )
-    return cell.procedure[filepath.stem]
-
-
-def _read_txt(filepath: Path):
-    """Read a plaintext EIS export file.
-
-    Args:
-        filepath: Path to the .txt file.
-
-    Returns:
-        Parsed data ready for downstream analysis.
+    Wraps a single pyimpspec DataSet (one frequency sweep / experiment).
     """
-    raise NotImplementedError("TXT reading not yet implemented.")
 
+    def __init__(self, dataset: DataSet, index: int, source_file: str):
+        self._dataset = dataset
+        self.index = index
+        self.source_file = source_file
 
-def _read_csv(filepath: Path):
-    """Read a CSV EIS export file.
+    @property
+    def label(self) -> str:
+        """Short label for legends, e.g. 'Set 01'."""
+        return f"Set {self.index + 1:02d}"
 
-    Args:
-        filepath: Path to the .csv file.
+    @property
+    def full_label(self) -> str:
+        """Full label for titles/filenames, e.g. 'my_file_set01'."""
+        return f"{self.source_file}_set{self.index + 1:02d}"
 
-    Returns:
-        Parsed data ready for downstream analysis.
-    """
-    raise NotImplementedError("CSV reading not yet implemented.")
+    @property
+    def frequencies(self):
+        """Frequencies in Hz, sorted high → low (numpy array)."""
+        return self._dataset.get_frequencies()
 
+    @property
+    def impedances(self):
+        """Complex impedances in Ohm (numpy array)."""
+        return self._dataset.get_impedances()
 
-# Maps file extensions to their reader function.
-# Add new formats here as they're implemented - no other code needs to change.
-_READERS = {
-    ".mpt": _read_mpt,
-    ".txt": _read_txt,
-    ".csv": _read_csv,
-}
+    @property
+    def num_points(self) -> int:
+        return self._dataset.get_num_points()
 
+    @property
+    def data(self) -> DataSet:
+        """Direct access to the underlying pyimpspec DataSet if needed."""
+        return self._dataset
 
-def load_eis_file(filepath: Path):
-    """Load a single EIS data file, dispatching based on file extension.
+    def to_dict(self) -> dict:
+        Z = self.impedances
+        return {
+            "label":          self.label,
+            "full_label":     self.full_label,
+            "index":          self.index,
+            "num_points":     self.num_points,
+            "frequencies_hz": self.frequencies.tolist(),
+            "re_z_ohm":       Z.real.tolist(),
+            "im_z_ohm":       Z.imag.tolist(),
+        }
 
-    Args:
-        filepath: Path to the raw data file.
-
-    Returns:
-        Parsed data ready for downstream analysis.
-
-    Raises:
-        UnsupportedFileTypeError: If the file extension has no registered reader.
-    """
-    extension = filepath.suffix.lower()
-    reader = _READERS.get(extension)
-
-    if reader is None:
-        raise UnsupportedFileTypeError(
-            f"No reader available for '{extension}' files ({filepath.name})."
+    def __repr__(self) -> str:
+        return (
+            f"<EISDataset index={self.index} "
+            f"label='{self.label}' "
+            f"points={self.num_points}>"
         )
 
-    return reader(filepath)
+_SUPPORTED_EXTENSIONS = (".mpt", ".txt")
 
 
-def load_batch(directory: Path) -> list:
-    """Load all supported EIS files found in a directory.
-
-    Args:
-        directory: Folder containing raw data files.
-
-    Returns:
-        List of parsed EIS datasets, one per successfully loaded file.
+def parse_eis_file(file_path: str | Path) -> List[EISDataset]:
     """
-    results = []
-    for filepath in sorted(directory.iterdir()):
-        if filepath.suffix.lower() not in _READERS:
-            continue  # silently skip unsupported file types
-        results.append(load_eis_file(filepath))
-    return results
+    Parse a BioLogic .mpt or plaintext .txt file into a list of EISDataset objects.
+    """
+    path = Path(file_path)
+
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    if path.suffix.lower() not in _SUPPORTED_EXTENSIONS:
+        raise ValueError(
+            f"Expected one of {_SUPPORTED_EXTENSIONS}, got '{path.suffix}'."
+        )
+
+    try:
+        raw_datasets: List[DataSet] = pyimpspec.parse_data(str(path))
+    except Exception as exc:
+        raise EISParseError(
+            f"Failed to parse '{path.name}': {exc}"
+        ) from exc
+
+    if not raw_datasets:
+        raise EISParseError(
+            f"No EIS datasets found in '{path.name}'. "
+            f"The file may be empty or malformed."
+        )
+
+    return [
+        EISDataset(ds, index=i, source_file=path.stem)
+        for i, ds in enumerate(raw_datasets)
+    ]

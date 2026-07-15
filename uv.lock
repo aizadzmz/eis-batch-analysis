@@ -431,6 +431,7 @@ dependencies = [
     { name = "pyimpspec" },
     { name = "pyprobe-data" },
     { name = "pyside6" },
+    { name = "streamlit" },
 ]
 
 [package.dev-dependencies]
@@ -444,6 +445,7 @@ requires-dist = [
     { name = "pyimpspec", specifier = ">=5.1.3" },
     { name = "pyprobe-data", specifier = ">=2.6.0" },
     { name = "pyside6", specifier = ">=6.11.1" },
+    { name = "streamlit" },
 ]
 
 [package.metadata.requires-dev]
