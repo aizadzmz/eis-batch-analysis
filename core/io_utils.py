@@ -1,3 +1,4 @@
+#parse typical PEIS/GEIS style data
 from pathlib import Path
 from typing import List
 
