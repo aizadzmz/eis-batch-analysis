@@ -1,6 +1,7 @@
 #KK and Z-HT
-from typing import Union
+from typing import Tuple, Union
 
+import numpy as np
 from pyimpspec import (
     KramersKronigResult,
     ZHITResult,

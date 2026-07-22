@@ -4,6 +4,7 @@ Mirrors the Streamlit app's workflow (load -> select -> style -> filter ->
 validate) but with explicit event handling instead of rerun-everything.
 """
 
+from functools import partial
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -237,6 +238,17 @@ class MainWindow(QMainWindow):
         valid_layout.addWidget(self.kk_radio)
         valid_layout.addWidget(self.zhit_radio)
 
+        self.fast_kk_check = QCheckBox("Fast KK (single representation)")
+        self.fast_kk_check.setToolTip(
+            "Kramers-Kronig normally fits both the impedance and admittance "
+            "representations and keeps whichever fits better, which roughly "
+            "doubles the run time. Admittance mainly helps spectra with "
+            "negative differential resistance; fast mode skips it and fixes "
+            "the representation to impedance. The Fext search (time-constant "
+            "range extension) is left at its default regardless."
+        )
+        valid_layout.addWidget(self.fast_kk_check)
+
         valid_layout.addWidget(QLabel("Outlier threshold (%)"))
         self.threshold_spin = QDoubleSpinBox()
         self.threshold_spin.setMinimum(0.0)
@@ -253,11 +265,6 @@ class MainWindow(QMainWindow):
         self.run_validation_button = QPushButton()
         self.run_validation_button.clicked.connect(self._run_validation)
         valid_layout.addWidget(self.run_validation_button)
-
-        self.show_removed_check = QCheckBox("Show removed points on plot")
-        self.show_removed_check.setChecked(True)
-        self.show_removed_check.toggled.connect(self._refresh)
-        valid_layout.addWidget(self.show_removed_check)
         layout.addWidget(valid_box)
 
         # 6. DRT settings
@@ -473,7 +480,8 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(placeholder)
 
         self.tabs = QTabWidget()
-        self.nyquist_pane = FigurePane(with_toolbar=True)
+        self.nyquist_pane = FigurePane(with_toolbar=True, with_overlay_actions=True)
+        self.nyquist_pane.replot_requested.connect(self._force_replot_nyquist)
         self.residuals_pane = FigureListPane()
         self.drt_pane = FigurePane(with_toolbar=True)
         self.drt_peaks_text = QPlainTextEdit()
@@ -587,6 +595,7 @@ class MainWindow(QMainWindow):
     def _on_method_changed(self, checked: bool) -> None:
         if not checked:
             return  # fires once per radio; only act on the newly-checked one
+        self.fast_kk_check.setEnabled(self.kk_radio.isChecked())
         self._update_validation_button_text()
         self._refresh()
 
@@ -604,7 +613,13 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         method = self._validation_method
-        runner = run_kk_test if method == VALIDATION_METHODS[0] else run_zhit
+        if method == VALIDATION_METHODS[0]:
+            if self.fast_kk_check.isChecked():
+                runner = partial(run_kk_test, admittance=False)
+            else:
+                runner = run_kk_test
+        else:
+            runner = run_zhit
 
         # Masks must be stable while the worker reads them, so lock the
         # sidebar for the duration of the run.
@@ -871,7 +886,6 @@ class MainWindow(QMainWindow):
 
         self._pending = dict(
             selected=selected,
-            show_removed=self.show_removed_check.isChecked(),
             method=method,
             threshold=threshold,
             validated_selected=validated_selected,
@@ -881,6 +895,15 @@ class MainWindow(QMainWindow):
         self._render_active_tab()
 
     def _on_tab_changed(self, _index: int) -> None:
+        self._render_active_tab()
+
+    def _force_replot_nyquist(self) -> None:
+        """Rebuild the Nyquist tab from current state, bypassing the dirty
+        check — used by the plot-area 'Replot' button to guarantee a fresh
+        figure even if nothing else changed."""
+        if self._pending is None:
+            return
+        self._tab_dirty.add(0)
         self._render_active_tab()
 
     def _render_active_tab(self) -> None:
@@ -895,16 +918,18 @@ class MainWindow(QMainWindow):
         p = self._pending
 
         if index == 0:
+            # Removed points are always drawn; the Nyquist pane's "Hide
+            # Removed Points" overlay button toggles their visibility.
             if self._mode == "Single":
                 fig, _ = plot_single(
                     p["selected"][0],
                     show=False,
                     style=self._style,
-                    show_removed=p["show_removed"],
+                    show_removed=True,
                 )
             else:
                 fig, _ = plot_overlay(
-                    p["selected"], show=False, style=self._style, show_removed=p["show_removed"]
+                    p["selected"], show=False, style=self._style, show_removed=True
                 )
             self.nyquist_pane.set_figure(fig)
 

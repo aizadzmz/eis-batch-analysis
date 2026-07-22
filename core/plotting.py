@@ -33,10 +33,16 @@ def plot_single(
 
     Z = dataset.impedances
 
-    _plot_series(ax, Z, dataset.label, style)
+    _plot_series(ax, Z, dataset.frequencies, dataset.label, style)
 
     if show_removed:
-        _plot_removed(ax, dataset.data.get_impedances(masked=True), "Removed")
+        _plot_removed(
+            ax,
+            dataset.data.get_impedances(masked=True),
+            dataset.data.get_frequencies(masked=True),
+            dataset.label,
+            "Removed",
+        )
 
     ax.set_title(title or dataset.full_label, fontsize=12)
     fig.canvas.manager.set_window_title(dataset.full_label)
@@ -86,12 +92,18 @@ def plot_overlay(
 
     for ds in datasets:
         Z = ds.impedances
-        _plot_series(ax, Z, ds.label, style)
+        _plot_series(ax, Z, ds.frequencies, ds.label, style)
 
     if show_removed:
         removed_label = "Removed"
         for ds in datasets:
-            _plot_removed(ax, ds.data.get_impedances(masked=True), removed_label)
+            _plot_removed(
+                ax,
+                ds.data.get_impedances(masked=True),
+                ds.data.get_frequencies(masked=True),
+                ds.label,
+                removed_label,
+            )
             removed_label = None  # only the first gets a legend entry
 
     window_title = datasets[0].source_file
@@ -249,23 +261,63 @@ def plot_drt(
     return fig, ax
 
 
-def _plot_series(ax: Axes, Z, label: str, style: str) -> None:
+GID_KEPT_POINTS = "kept_points"
+GID_REMOVED_POINTS = "removed_points"
+
+# Attribute name used to stash per-point (dataset label, frequency) metadata
+# on plotted artists, so GUI code can recover "what set / what freq" on click
+# without re-deriving it from the raw x/y data.
+POINT_META_ATTR = "eis_point_meta"
+
+
+def _attach_point_meta(artist, label: str, freq) -> None:
+    """Stash the dataset label and per-point frequencies on artist for later
+    lookup (e.g. by a click handler), keyed by the point's index in the
+    plotted array."""
+    setattr(artist, POINT_META_ATTR, {"label": label, "freq": freq})
+
+
+def _plot_series(ax: Axes, Z, freq, label: str, style: str) -> None:
     """Draw one dataset's impedance on ax, either as a scatter or a connected line."""
     x, y = Z.real, -Z.imag
     if style == "scatter":
-        ax.scatter(x, y, s=15, label=label)
+        artist = ax.scatter(x, y, s=15, label=label, picker=True, pickradius=5)
     elif style == "line":
-        ax.plot(x, y, linewidth=1, label=label)
+        (artist,) = ax.plot(x, y, linewidth=1, label=label, picker=5)
     else:
         raise ValueError(f"Unknown style '{style}'; expected 'scatter' or 'line'.")
+    artist.set_gid(GID_KEPT_POINTS)
+    _attach_point_meta(artist, label, freq)
 
 
-def _plot_removed(ax: Axes, Z, label: Optional[str]) -> None:
+def _plot_removed(ax: Axes, Z, freq, label: str, legend_label: Optional[str]) -> None:
     """Draw masked-out points as muted 'x' markers."""
     if Z.size == 0:
         return
     x, y = Z.real, -Z.imag
-    ax.scatter(x, y, s=25, marker="x", color="0.6", linewidths=1, label=label, zorder=2)
+    artist = ax.scatter(
+        x, y, s=25, marker="x", color="0.6", linewidths=1, label=legend_label,
+        zorder=2, picker=True, pickradius=5,
+    )
+    artist.set_gid(GID_REMOVED_POINTS)
+    _attach_point_meta(artist, f"{label} (removed)", freq)
+
+
+def equal_aspect_limits(
+    xmin: float, xmax: float, ymin: float, ymax: float, *, include_origin: bool = True
+) -> Tuple[float, float, float, float]:
+    """Pad (xmin, xmax, ymin, ymax) so both axes span the same range (for
+    aspect='equal'). When include_origin is True (the Nyquist plot default),
+    the origin is folded into the range first so 0 is never cropped out."""
+    if include_origin:
+        xmin, xmax = min(xmin, 0), max(xmax, 0)
+        ymin, ymax = min(ymin, 0), max(ymax, 0)
+
+    # Pad the narrower axis so both spans match, keeping the scale equal.
+    span = max(xmax - xmin, ymax - ymin)
+    x_pad = (span - (xmax - xmin)) / 2
+    y_pad = (span - (ymax - ymin)) / 2
+    return xmin - x_pad, xmax + x_pad, ymin - y_pad, ymax + y_pad
 
 
 def _format_ax(ax: Axes) -> None:
@@ -274,19 +326,9 @@ def _format_ax(ax: Axes) -> None:
     ax.set_ylabel("-Z'' (Ω)", fontsize=10)
     ax.grid(True, linestyle="--", alpha=0.5)
 
-    xmin, xmax = ax.get_xlim()
-    ymin, ymax = ax.get_ylim()
-
-    # Ensure the origin falls within each axis's range (not necessarily at an edge).
-    x_lo, x_hi = min(xmin, 0), max(xmax, 0)
-    y_lo, y_hi = min(ymin, 0), max(ymax, 0)
-
-    # Pad the narrower axis so both spans match, keeping the scale equal.
-    span = max(x_hi - x_lo, y_hi - y_lo)
-    x_pad = (span - (x_hi - x_lo)) / 2
-    y_pad = (span - (y_hi - y_lo)) / 2
-    ax.set_xlim(x_lo - x_pad, x_hi + x_pad)
-    ax.set_ylim(y_lo - y_pad, y_hi + y_pad)
+    xlo, xhi, ylo, yhi = equal_aspect_limits(*ax.get_xlim(), *ax.get_ylim())
+    ax.set_xlim(xlo, xhi)
+    ax.set_ylim(ylo, yhi)
     ax.set_aspect("equal", adjustable="box")
 
     ax.axhline(0, color="#CC9D33", linewidth=1, zorder=1)
